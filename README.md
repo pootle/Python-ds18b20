@@ -12,4 +12,4 @@ Written to run originally on a Raspberry pi, it uses the linux 1-wire driver so 
 
 Run the app automatically on boot with (for example) crontab with a line similar to:
 
-@reboot python3 /home/pi/gitbits/one-wire/temprdr.py -d ~/data/mmm 1>/home/pi/logs.log 2>/home/pi/logr.log
+@reboot python3 /home/pi/gitbits/Python-ds18b20/temprdr.py -d ~/data/mmm 1>/home/pi/logs.log 2>/home/pi/logr.log
