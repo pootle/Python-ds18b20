@@ -1,0 +1,8 @@
+{"namemap":{
+    "28-0000048cabd0": "sens1",
+    "28-d971cc1964ff":"ceiling",
+    "28-0000048cd579": "test"},
+ "csvparams":{
+    "squash":0.1,
+    "tempform":"%5.2f"}
+}

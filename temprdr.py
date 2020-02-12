@@ -2,11 +2,12 @@
 
 import pathlib as pl
 import time, argparse, threading, queue
+import json, sys
 
 ROOTDIR='/sys/bus/w1/devices'
 
 import logging
-logging.basicConfig(filename='/home/pi/rrlog.log',level=logging.DEBUG)
+logging.basicConfig(filename='/home/pi/rrlog.log',level=logging.INFO)
 
 class ds18b20():
     """
@@ -20,16 +21,22 @@ class ds18b20():
         """
         sets up a sensor instance for a single sensor
         
-        name    : the sensor's 1-wire name (e.g. 28-nnnnnnnn)
+        name        : the sensor's 1-wire name (e.g. 28-nnnnnnnn)
         
-        offset  : an offset for the read value to allow very basic calibration
+        mappedname  : name to use when logging the data
+        
+        offset      : an offset for the read value to allow very basic calibration
         """
         self.name=name
+        self.mappedname=name
         self.rdr=pl.Path(ROOTDIR)/name/'w1_slave'
         self.goodreads=0
         self.badreads=0
         self.offset=offset
         self.lasterror=None
+
+    def setmapped(self, mappedname):
+        self.mappedname=mappedname
 
     def read(self):
         """
@@ -41,7 +48,7 @@ class ds18b20():
             l=trdr.readline().strip()
             if l.endswith('YES'):
                 ls=trdr.readline().split('t=')
-                tval=int(ls[1])/1000
+                tval=int(ls[1])/1000+self.offset
                 self.goodreads+=1
                 return tval
             else:
@@ -80,21 +87,26 @@ class rundev():
                     time.sleep(delay)
                     v=self.dev.read()
                     if v is None:
-                        errq.put((nexttick, self.dev.name, dev.lasterror))
+                        errq.put((nexttick, self.dev.mappedname, dev.lasterror))
                     else:
-                        dataq.put((nexttick, self.dev.name, v))
+                        dataq.put((nexttick, self.dev.mappedname, v))
+                    nexttick += tick
                 else:
-                    errq.put((time.time(), devs[0].name, 'overrun %4.3f' % -delay))
-                nexttick += tick
-            errq.put((time.time(), self.dev.name, 'elapsed time: %6.2f, sleep time: %6.2f' % (time.time()-starttime, sleeptime)))
+                    tm=time.time()
+                    errq.put((tm, self.dev.mappedname, 'overrun %4.3f' % -delay))
+                    while tm > nexttick:
+                        nexttick+=tick
+                
+            errq.put((time.time(), self.dev.mappedname, 'elapsed time: %6.2f, sleep time: %6.2f' % (time.time()-starttime, sleeptime)))
         except:
             logging.debug('ooops!', exc_info=True)
 
 class csvfilewriter():
-    def __init__(self, devorder, csvfile, squash):
+    def __init__(self, devorder, csvfile, squash, tempform='%5.2f'):
         self.targname=csvfile.with_suffix('').name
         self.folder=csvfile.parent
         self.devorder=devorder
+        self.tempform=tempform
         self.squash=squash!=0
         self.sigchange=squash
         if self.squash:
@@ -129,7 +141,7 @@ class csvfilewriter():
         self.csvfile=(self.folder/fn).with_suffix('.csv')
         self.csvfile.parent.mkdir(parents=True, exist_ok=True)
         with self.csvfile.open('w') as cw:
-            cw.write('time, %s\n' % ', '.join([name for name in self.devorder]))
+            cw.write('time, %s\n' % ','.join([name for name in self.devorder]))
         self.lastwrite=0
         logging.info('new file created: %s' % str(self.csvfile))
 
@@ -154,7 +166,7 @@ class csvfilewriter():
                 for ix, v in enumerate(vals):
                     if not v is None:
                         self.lastvals[ix]=v
-                    vstr=', '.join([' ' if v is None else '%5.1f' % v for v in self.lastvals])
+                    vstr=','.join([' ' if v is None else self.tempform % v for v in self.lastvals])
                 with self.csvfile.open('a') as cw:
                     cw.write('%s, %s\n' % (time.strftime('%y-%m-%d %H:%M:%S', time.localtime(tstamp)), vstr))
                 self.lastwrite=tstamp
@@ -201,22 +213,50 @@ def validtick(tickstr):
 
 if __name__=='__main__':
     argp=argparse.ArgumentParser(description='simple logger for 1-wire sensors')
-    argp.add_argument('--datafile', '-d', default='sensors', help='base for filenames to record data')
-    argp.add_argument('--console', '-c', help='include  with any value for live output to console')
+    argp.add_argument('--datafile', '-d', default='~/data/sensors', help='base for filenames to record data')
+    argp.add_argument('--livelog', '-l', help='include for live output to console')
     argp.add_argument('--tick', '-t', default=5, type=validtick, help='tick interval - target time in seconds between readings. 2 seconds is the fastest reasonable time')
+    argp.add_argument('--config', '-c', help='(optional) path to config file')
     args=argp.parse_args()
+    if not args.config is None:
+        confpath=pl.Path(args.config)
+        if not confpath.exists():
+            print('unable to find config file %s' % str(confpath), file=sys.stderr)
+            sys.exit(1)
+        else:
+            try:
+                with confpath.open('r') as cf:
+                    config=json.load(cf)
+            except:
+                print('failed to load config from %s' % str(confpath))
+                raise
+    else:
+        config={}
+    if not 'tick' in config:
+        config['tick']=args.tick
+    else:
+        config['tick']=float(config['tick'])
+    if not 'datafile' in config:
+        config['datafile']=args.datafile
     devs=find_devices() 
     dqueue=queue.Queue()
     errqueue=queue.Queue()
     readers=[rundev(dev) for dev in devs]
-    devnames=[dev.name for dev in devs]
-    logging.info('start using ddevices %s' % devnames)
-    threads=[threading.Thread(target=areader.runloop, kwargs={'dataq':dqueue, 'errq':errqueue, 'tick':args.tick, 'startround':5}) for areader in readers]
+    if 'namemap' in config:
+        for dev in devs:
+            if dev.name in config['namemap']:
+                dev.setmapped(config['namemap'][dev.name])
+    devnames=[dev.mappedname for dev in devs]
+    logging.info('start using devices %s' % devnames)
+    threads=[threading.Thread(target=areader.runloop, kwargs={'dataq':dqueue, 'errq':errqueue, 'tick':config['tick'], 'startround':5}) for areader in readers]
     for t in threads:
         t.start()
-    csvwriter = csvfilewriter(devorder=devnames, csvfile=pl.Path(pl.Path(args.datafile).expanduser()), squash=.2)
-    writer=gather(devorder=devnames, console=not args.console is None, writers=[csvwriter])
-    devrec={dev.name:None for dev in devs}
+    csvwriter = csvfilewriter(
+                devorder=devnames,
+                csvfile=pl.Path(pl.Path(args.datafile).expanduser()),
+                **config.get('csvparams',{}))
+    writer=gather(devorder=devnames, console=not args.livelog is None, writers=[csvwriter])
+    devrec={dn:None for dn in devnames}
     try:
         while True:
             time.sleep(1)
@@ -240,12 +280,12 @@ if __name__=='__main__':
                         else:
                             logging.debug('timeout writing record')
                             writer.writerec(tstamp, devrec)
-                            devrec={dev.name:None for dev in devs}
+                            devrec={dn:None for dn in devnames}
                             devrec[devname]=value
                 except queue.Empty:
                     writer.writerec(tstamp, devrec)
                     logging.debug('empty writing record')
-                    devrec={dev.name:None for dev in devs}
+                    devrec={dn:None for dn in devnames}
                     tstamp=ntstamp
             tstamp=0
             while not tstamp is None:
