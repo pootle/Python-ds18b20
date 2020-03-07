@@ -80,9 +80,11 @@ class rundev():
         starttime=time.time()
         sleeptime=0
         try:
+            logging.info('start device %s with tick %4.1f' %(self.dev.mappedname, tick))    
             while self.running:
                 delay=nexttick-time.time()
                 if delay > 0:
+                    logging.debug('delay is %3.1f' % delay)
                     sleeptime += delay
                     time.sleep(delay)
                     v=self.dev.read()
@@ -99,18 +101,35 @@ class rundev():
                 
             errq.put((time.time(), self.dev.mappedname, 'elapsed time: %6.2f, sleep time: %6.2f' % (time.time()-starttime, sleeptime)))
         except:
-            logging.debug('ooops!', exc_info=True)
+            logging.info('ooops!', exc_info=True)
 
 class csvfilewriter():
-    def __init__(self, devorder, csvfile, squash, tempform='%5.2f'):
-        self.targname=csvfile.with_suffix('').name
-        self.folder=csvfile.parent
+    def __init__(self, devorder, datafile, squash, tempform='%5.2f', forcewrite=60):
+        """
+        sets up info for writing consistent csv file
+
+        devorder    : list of device names in the order they are to be written on each line
+        
+        datafile    : root of the filename to write - local date / time will be appended to this
+        
+        squash      : if 0 every record is written, otherwise this is the difference in temp (on any 1 sensor) that will
+                      cause a record to be written
+        
+        tempform    : format used to write each temperature - primarlily to restrict number of decimal places written, also 
+                      this makes it easier to visually scan lines from the file as all readings will line up
+        
+        forcewrite  : if squash is > 0 then a record will always be written after this much time
+        """
+        datafilepath=pl.Path(datafile).expanduser()
+        self.targname=datafilepath.with_suffix('').name
+        self.folder=datafilepath.parent
         self.devorder=devorder
         self.tempform=tempform
         self.squash=squash!=0
         self.sigchange=squash
         if self.squash:
             self.lastvals=[999]* len(self.devorder)
+        self.forcewrite=forcewrite
         cands=sorted(self.folder.glob(self.targname+ '*'))
         if len(cands)==0:
             donew=True
@@ -141,7 +160,7 @@ class csvfilewriter():
         self.csvfile=(self.folder/fn).with_suffix('.csv')
         self.csvfile.parent.mkdir(parents=True, exist_ok=True)
         with self.csvfile.open('w') as cw:
-            cw.write('time, %s\n' % ','.join([name for name in self.devorder]))
+            cw.write('time,%s\n' % ','.join([name for name in self.devorder]))
         self.lastwrite=0
         logging.info('new file created: %s' % str(self.csvfile))
 
@@ -154,7 +173,7 @@ class csvfilewriter():
                 if newti.tm_hour<oldti.tm_hour:
                     self.startfile()
                     self.lastwrite=0
-            if not self.squash or tstamp-self.lastwrite >= 60:
+            if not self.squash or tstamp-self.lastwrite >= self.forcewrite:
                 sigchanges=True
             else:
                 sigchanges=False
@@ -168,7 +187,7 @@ class csvfilewriter():
                         self.lastvals[ix]=v
                     vstr=','.join([' ' if v is None else self.tempform % v for v in self.lastvals])
                 with self.csvfile.open('a') as cw:
-                    cw.write('%s, %s\n' % (time.strftime('%y-%m-%d %H:%M:%S', time.localtime(tstamp)), vstr))
+                    cw.write('%s,%s\n' % (time.strftime('%y-%m-%d %H:%M:%S', time.localtime(tstamp)), vstr))
                 self.lastwrite=tstamp
         else:
             logging.debug('no csvfile')
@@ -178,18 +197,13 @@ class gather():
     assembles readings into complete sets and writes a csv file with option to skip similar readings.
     The first line is a header with the name of each device 
     """
-    def __init__(self, devorder, console, writers, forcewrite=60):
+    def __init__(self, devorder, console, writers):
         """
         devorder    : list of device names in the order they are written to each line
         
         console     :  if True, each incoming record is written to stdout (note records may have blank entries
         
         writers     : list of writer objects to handle data
-        
-        
-        forcewrite  : if squash is > 0 then even if no value has changes, a record will be written at least every 'forcewrite' seconds.
-                      for example, this shows the sensors are still being read and makes it easier to plot graphs from the data
-        
         """
         self.devorder=devorder
         self.console=console
@@ -210,6 +224,7 @@ def validtick(tickstr):
         raise argparse.ArgumentTypeError('tick parameter must be an integer')
     if tick < 1:
         raise argparse.ArgumentTypeError('tick parameter must 1 or more')
+    return tick
 
 if __name__=='__main__':
     argp=argparse.ArgumentParser(description='simple logger for 1-wire sensors')
@@ -243,17 +258,23 @@ if __name__=='__main__':
     errqueue=queue.Queue()
     readers=[rundev(dev) for dev in devs]
     if 'namemap' in config:
+        devids=[e[0] for e in config['namemap']]
+        devnames=[e[1] for e in config['namemap']]
+        nonames=[]
         for dev in devs:
-            if dev.name in config['namemap']:
-                dev.setmapped(config['namemap'][dev.name])
-    devnames=[dev.mappedname for dev in devs]
-    logging.info('start using devices %s' % devnames)
+            if dev.name in devids:
+                dev.setmapped(devnames[devids.index(dev.name)])
+            else:
+                nonames.append(dev.name)
+        devnames += nonames
+    else:
+        devnames=[dev.name for dev in devs]
+    logging.info('start using devices %s' % (', '.join([dev.name if dev.name==dev.mappedname else '%s->%s' % (dev.name, dev.mappedname) for dev in devs])))
     threads=[threading.Thread(target=areader.runloop, kwargs={'dataq':dqueue, 'errq':errqueue, 'tick':config['tick'], 'startround':5}) for areader in readers]
     for t in threads:
         t.start()
     csvwriter = csvfilewriter(
                 devorder=devnames,
-                csvfile=pl.Path(pl.Path(args.datafile).expanduser()),
                 **config.get('csvparams',{}))
     writer=gather(devorder=devnames, console=not args.livelog is None, writers=[csvwriter])
     devrec={dn:None for dn in devnames}
@@ -294,7 +315,7 @@ if __name__=='__main__':
                 except queue.Empty:
                     tstamp=None
                 if not tstamp is None:
-                    logging.info('AAAAAAAA %s: %s' % (devname, error))
+                    logging.info('Driver report %s: %s' % (devname, error))
             
     except KeyboardInterrupt:
         pass
@@ -312,5 +333,5 @@ if __name__=='__main__':
         except queue.Empty:
             tstamp=None
         if not tstamp is None:
-            print('AAAAAAAA', devname, error)
+            print('Final driver report', devname, error)
     logging.info('closing')

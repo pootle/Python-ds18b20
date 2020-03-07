@@ -1,8 +1,12 @@
-{"namemap":{
-    "28-0000048cabd0": "sens1",
-    "28-d971cc1964ff":"ceiling",
-    "28-0000048cd579": "test"},
+{"namemap":[
+    ["28-9e77cc1964ff", "ceiling"],
+    ["28-d971cc1964ff", "upper"],
+    ["28-3276cc1964ff", "lower"],
+    ["28-fb3fcc1964ff", "floor"]],
+"tick": 20,
  "csvparams":{
     "squash":0.1,
-    "tempform":"%5.2f"}
+    "tempform":" %5.2f",
+    "forcewrite": 120,
+    "datafile": "~/data/room1"}
 }
