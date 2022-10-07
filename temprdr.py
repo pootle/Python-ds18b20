@@ -7,7 +7,8 @@ import json, sys
 ROOTDIR='/sys/bus/w1/devices'
 
 import logging
-logging.basicConfig(filename='/home/pi/rrlog.log',level=logging.INFO)
+logpath = pl.Path.home()/'rrlog.log'
+logging.basicConfig(filename=logpath,level=logging.INFO)
 
 class ds18b20():
     """
@@ -246,7 +247,14 @@ if __name__=='__main__':
                 print('failed to load config from %s' % str(confpath))
                 raise
     else:
-        config={}
+        config={
+            "tick": 20,
+            "csvparams": {
+                "squash":0.1,
+                "tempform":" %5.2f",
+                "forcewrite": 120,
+                "datafile": "~/data/temperature-log"}
+        }
     if not 'tick' in config:
         config['tick']=args.tick
     else:
